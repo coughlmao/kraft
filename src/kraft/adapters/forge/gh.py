@@ -550,7 +550,16 @@ class GhCli(mr_ops.CliWaits):
             state = "success"
         else:
             state = "pending"
-        failed_jobs = _red_jobs(checks, url="detailsUrl")
+        failed_jobs = list(_red_jobs(checks, url="detailsUrl"))
+        if state == "failed":
+            run_ids = {str(c.get("workflowRunId")) for c in checks if c.get("workflowRunId")}
+            for run_id in sorted(run_ids):
+                _, run_jobs = await self._run_failure(repo, run_id)
+                failed_jobs.extend(
+                    job
+                    for job in run_jobs
+                    if job.status == "cancelled" and job.failure_reason == "cancelled_no_steps"
+                )
         return CIStatus(
             state=state,
             url=str(data.get("url", "")),
@@ -559,7 +568,7 @@ class GhCli(mr_ops.CliWaits):
             merge_detail=detail,
             block_reason=block_reason,
             sha=sha,
-            failed_jobs=failed_jobs,
+            failed_jobs=tuple(failed_jobs),
             cancelled_at=_cancelled_at(checks, at="completedAt"),
         )
 
@@ -1105,9 +1114,10 @@ class GhCli(mr_ops.CliWaits):
     async def _run_failure(
         self, repo: Path, run_id: str
     ) -> tuple[tuple[str, ...], tuple[FailedJob, ...]]:
-        """A failed run's red jobs, and the tail of the first two jobs' failed
-        steps' logs. A job list that cannot be read is `_UNREADABLE_JOBS`, not
-        an empty one, which `ci.is_infra_red` would read as a runner problem."""
+        """A failed run's red jobs and queued cancellations, plus the tail of
+        the first two red jobs' logs. A job list that cannot be read is
+        `_UNREADABLE_JOBS`, not an empty one, which `ci.is_infra_red` would
+        read as a runner problem."""
         if not run_id:
             return (), _UNREADABLE_JOBS
         try:
@@ -1121,11 +1131,22 @@ class GhCli(mr_ops.CliWaits):
         except ForgeError:
             return (), _UNREADABLE_JOBS
         rows = [j for j in data if isinstance(j, dict)]
-        failed_jobs = _red_jobs(rows, url="html_url")
+        red_jobs = list(_red_jobs(rows, url="html_url"))
+        failed_jobs = list(red_jobs)
+        failed_jobs += [
+            FailedJob(
+                str(row.get("name", "")),
+                "cancelled",
+                "cancelled_no_steps",
+                str(row.get("html_url") or "") or None,
+            )
+            for row in rows
+            if str(row.get("conclusion") or "").upper() == "CANCELLED" and row.get("steps") == []
+        ]
         red = [j for j in rows if str(j.get("conclusion") or "").upper() in _GH_RED]
         detail: tuple[str, ...] = ()
         # ponytail: first two failed jobs, last 15 log lines each, as `glab`.
-        for job, row in zip(failed_jobs[:2], red[:2], strict=True):
+        for job, row in zip(red_jobs[:2], red[:2], strict=True):
             reason = job.failure_reason
             detail += (f"job {job.name}: failed" + (f" ({reason})" if reason else ""),)
             try:
@@ -1139,7 +1160,7 @@ class GhCli(mr_ops.CliWaits):
                 continue
             log = gq.failed_step_log(row, whole.text)
             detail += tuple(f"  {line}" for line in render.terminal_lines(log.strip())[-15:])
-        return detail, failed_jobs
+        return detail, tuple(failed_jobs)
 
     async def find_mr(self, *, repo: Path, branch: str) -> MRRef | None:
         data = await self._gql(repo, gq.FIND_QUERY, gq.owner_vars(b=branch))
@@ -1231,11 +1252,7 @@ class GhCli(mr_ops.CliWaits):
                 status=str(
                     j.get("conclusion") if j.get("status") == "completed" else j.get("status")
                 ),
-                failure_reason=(
-                    str(j["conclusion"])
-                    if str(j.get("conclusion") or "").upper() in _GH_RED
-                    else None
-                ),
+                failure_reason=_GH_FAILURE_REASON.get(str(j.get("conclusion") or "").upper()),
                 url=str(j.get("html_url") or ""),
             )
             for j in rows

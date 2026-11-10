@@ -15,6 +15,8 @@ from .api_outputs import (
     READ_NUMBER,
     check_run,
     contexts_page,
+    job,
+    json,
     pr_by_branch,
     pr_by_number,
     pull_request,
@@ -82,7 +84,7 @@ async def test_gh_ci_status_reads_the_check_rollup(cli, tmp_path, view, state, j
 
 
 @pytest.mark.parametrize(
-    "checks, state, failed, cancelled_at",
+    "checks, state, failed, cancelled_at, actions_jobs",
     [
         # Kraft-zn8me / Kraft-7g5h4 / Kraft-50bhi: GitHub cancels the superseded
         # run's jobs seconds before it registers the successor's checks, so a
@@ -97,6 +99,7 @@ async def test_gh_ci_status_reads_the_check_rollup(cli, tmp_path, view, state, j
             "pending",
             (),
             "",
+            None,
         ),
         # Every check settled, one cancelled: still a wait, and when the
         # cancel happened, for `render_ci` to tell a successor from none
@@ -110,6 +113,7 @@ async def test_gh_ci_status_reads_the_check_rollup(cli, tmp_path, view, state, j
             "pending",
             (),
             "2026-09-18T00:16:00Z",
+            None,
         ),
         # A cancelled sibling does not hide a real failure, and is not one of
         # the failed jobs a fix loop is handed.
@@ -121,19 +125,50 @@ async def test_gh_ci_status_reads_the_check_rollup(cli, tmp_path, view, state, j
             "failed",
             ("lint",),
             "",
+            None,
+        ),
+        (
+            (
+                check_run("test", "FAILURE", run=123456),
+                check_run("e2e", "CANCELLED", run=123456),
+            ),
+            "failed",
+            ("lint",),
+            "",
+            (
+                job(1, "test", "failure", steps=[{"name": "run", "conclusion": "failure"}]),
+                job(2, "e2e", "cancelled"),
+            ),
         ),
     ],
-    ids=["cancelled-beside-running", "only-cancelled", "cancelled-beside-a-failure"],
+    ids=[
+        "cancelled-beside-running",
+        "only-cancelled",
+        "cancelled-beside-a-failure",
+        "cancelled-job-with-no-steps",
+    ],
 )
 async def test_gh_ci_status_never_reads_a_cancelled_check_as_a_verdict(
-    cli, tmp_path, checks, state, failed, cancelled_at
+    cli, tmp_path, checks, state, failed, cancelled_at, actions_jobs
 ):
-    _gh(cli, _view(*checks))
+    routes = {}
+    if actions_jobs is not None:
+        routes["api*repos/{owner}/{repo}/actions/runs/123456/jobs*"] = json.dumps(
+            {"jobs": actions_jobs}
+        )
+    _gh(cli, _view(*checks), routes=routes)
 
     status = await forge.GhCli().ci_status(repo=tmp_path, mr=PR)
 
     assert status.state == state
-    assert tuple(j.name for j in status.failed_jobs) == failed
+    if actions_jobs is None:
+        assert tuple(j.name for j in status.failed_jobs) == failed
+    else:
+        assert [(j.name, j.status, j.failure_reason) for j in status.failed_jobs] == [
+            ("test", "failed", "script_failure"),
+            ("e2e", "cancelled", "cancelled_no_steps"),
+        ]
+        assert forge.ci.is_infra_red(status)
     assert status.cancelled_at == cancelled_at
 
 
@@ -337,3 +372,29 @@ async def test_gh_mr_body_reads_the_live_description(cli, tmp_path):
     assert await forge.GhCli().mr_body(repo=tmp_path, branch="b") == "the live body"
     argv = cli.argv("gh")
     assert "b=b" in argv and "statusCheckRollup" not in "\n".join(argv)
+
+
+@pytest.mark.parametrize(
+    "conclusion, expected",
+    [
+        ("failure", "script_failure"),
+        ("timed_out", "job_execution_timeout"),
+        ("startup_failure", "runner_system_failure"),
+        ("success", None),
+        ("cancelled", None),
+    ],
+)
+async def test_gh_jobs_normalizes_failure_reasons(cli, tmp_path, conclusion, expected):
+    cli.stub(
+        "gh",
+        json.dumps(
+            {
+                "jobs": [
+                    job(1, "build", conclusion),
+                ]
+            }
+        ),
+    )
+    jobs = await forge.GhCli().jobs(repo=tmp_path, pipeline_id="123")
+
+    assert jobs[0].failure_reason == expected
