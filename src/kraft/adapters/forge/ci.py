@@ -90,17 +90,16 @@ def _abandoned(cancelled_at: str) -> bool:
 #: code. `script_failure`, an unrecognised reason, or a red pipeline that
 #: named no reason at all, are code-red — the failure a fix loop is for.
 #:
-#: A cancelled job with no steps is different from a cancelled run: GitHub can
-#: cancel a job while it is queued for an unavailable runner, then a summary
-#: job can be the only red check. That summary failure is a consequence of the
-#: missing runner, so it must not start a code repair.
+#: No `"cancelled"`: a cancelled run never reaches here. Both backends read it
+#: as pending (Kraft-zn8me), because a cancelled run is never a verdict, and a
+#: run a person cancelled with no successor is `render_ci`'s "abandoned".
+#: It is never auto-retried here, which would override that person's decision.
 _INFRA_REASONS = frozenset(
     {
         "runner_system_failure",
         "stuck_or_timeout_failure",
         "job_execution_timeout",
         "scheduler_failure",
-        "cancelled_no_steps",
     }
 )
 
@@ -123,9 +122,9 @@ def is_infra_red(ci: CIStatus) -> bool:
     `failure_reason=None` instead, which is not a member of `_INFRA_REASONS`,
     so the `all(...)` below reads it as code-red by default. Only a
     *successful* read that confirms no job ran returns the real empty tuple
-    this function treats as infra. A cancelled job with no steps is also infra
-    evidence: a downstream summary failure can be the only red check after a
-    runner never started.
+    this function treats as infra. A cancelled job with no steps is separately
+    treated as infra evidence: a downstream summary failure can be the only red
+    check after a runner never started.
     """
     if not ci.failed_jobs:
         return True

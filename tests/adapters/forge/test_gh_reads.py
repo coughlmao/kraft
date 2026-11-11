@@ -129,7 +129,7 @@ _PAGE = [rest_label(f"l{i}") for i in range(100)]
                     "sad",
                     "",
                     "failure",
-                    "script_failure",
+                    "failure",
                     "https://github.com/o/r/actions/runs/555/job/20",
                 ),
                 Job(

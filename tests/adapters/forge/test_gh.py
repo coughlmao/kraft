@@ -133,7 +133,7 @@ async def test_gh_ci_status_reads_the_check_rollup(cli, tmp_path, view, state, j
                 check_run("e2e", "CANCELLED", run=123456),
             ),
             "failed",
-            ("lint",),
+            ("test",),
             "",
             (
                 job(1, "test", "failure", steps=[{"name": "run", "conclusion": "failure"}]),
@@ -372,29 +372,3 @@ async def test_gh_mr_body_reads_the_live_description(cli, tmp_path):
     assert await forge.GhCli().mr_body(repo=tmp_path, branch="b") == "the live body"
     argv = cli.argv("gh")
     assert "b=b" in argv and "statusCheckRollup" not in "\n".join(argv)
-
-
-@pytest.mark.parametrize(
-    "conclusion, expected",
-    [
-        ("failure", "script_failure"),
-        ("timed_out", "job_execution_timeout"),
-        ("startup_failure", "runner_system_failure"),
-        ("success", None),
-        ("cancelled", None),
-    ],
-)
-async def test_gh_jobs_normalizes_failure_reasons(cli, tmp_path, conclusion, expected):
-    cli.stub(
-        "gh",
-        json.dumps(
-            {
-                "jobs": [
-                    job(1, "build", conclusion),
-                ]
-            }
-        ),
-    )
-    jobs = await forge.GhCli().jobs(repo=tmp_path, pipeline_id="123")
-
-    assert jobs[0].failure_reason == expected

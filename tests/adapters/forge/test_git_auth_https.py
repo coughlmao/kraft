@@ -301,8 +301,7 @@ async def test_a_path_scoped_follow_redirects_and_ssl_verify_never_beat_our_pins
         monkeypatch.delenv("GIT_SSL_CAINFO")
         remote.web.redirect = None
         plain = await _ls_remote(remote.repo)
-        assert "certificate" not in plain.lower()
-        assert "authentication failed" in plain.lower() or "username" in plain.lower()
+        assert "certificate" not in plain.lower() and "Username" in plain
         remote.web.authorizations.clear()
         with pytest.raises(builtins.BaseFetchRefused, match="verify origin's certificate"):
             await builtins.upstream_head(remote.repo, "main")
@@ -311,11 +310,7 @@ async def test_a_path_scoped_follow_redirects_and_ssl_verify_never_beat_our_pins
 
 async def _ls_remote(repo) -> str:
     done = subprocess.run(
-        ["git", "ls-remote", "origin"],
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        env=os.environ,
+        ["git", "ls-remote", "origin"], cwd=repo, capture_output=True, text=True, env=os.environ
     )
     return done.stderr
 
@@ -472,7 +467,6 @@ async def test_an_api_backend_pushes_with_its_pinned_account(remote):
 
 async def test_a_cli_backend_pushes_with_no_header(remote, monkeypatch):
     monkeypatch.setenv("GIT_TERMINAL_PROMPT", "0")  # git's own credential must not ask a TTY
-    monkeypatch.delenv("GIT_ASKPASS", raising=False)
     with pytest.raises(ForgeError):  # git's own credential: the remote wants a token
         await GlabCli().push(repo=remote.repo, branch="kraft/abc")
     assert remote.web.authorizations and set(remote.web.authorizations) == {None}

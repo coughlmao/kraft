@@ -312,6 +312,20 @@ def _red_jobs(rows: list[dict], *, url: str) -> tuple[FailedJob, ...]:
     )
 
 
+def _cancelled_no_step_jobs(rows: list[dict]) -> tuple[FailedJob, ...]:
+    """Return queued jobs GitHub cancelled before assigning them a runner."""
+    return tuple(
+        FailedJob(
+            str(row.get("name", "")),
+            "cancelled",
+            "cancelled_no_steps",
+            str(row.get("html_url") or "") or None,
+        )
+        for row in rows
+        if str(row.get("conclusion") or "").upper() == "CANCELLED" and row.get("steps") == []
+    )
+
+
 def _runs_state(runs: list[dict]) -> tuple[CIState, tuple[str, ...]]:
     """One state for workflow runs, and a line per run: pending until every run
     has completed, then red if any is, green if all settled well, and pending
@@ -554,12 +568,11 @@ class GhCli(mr_ops.CliWaits):
         if state == "failed":
             run_ids = {str(c.get("workflowRunId")) for c in checks if c.get("workflowRunId")}
             for run_id in sorted(run_ids):
-                _, run_jobs = await self._run_failure(repo, run_id)
-                failed_jobs.extend(
-                    job
-                    for job in run_jobs
-                    if job.status == "cancelled" and job.failure_reason == "cancelled_no_steps"
-                )
+                try:
+                    rows = await self._read_jobs(repo, run_id)
+                except ForgeError:
+                    continue
+                failed_jobs.extend(_cancelled_no_step_jobs(rows))
         return CIStatus(
             state=state,
             url=str(data.get("url", "")),
@@ -1121,28 +1134,11 @@ class GhCli(mr_ops.CliWaits):
         if not run_id:
             return (), _UNREADABLE_JOBS
         try:
-            # strict: a capped list is not the whole run, and a missing "jobs" raises
-            data = await self._paged(
-                repo,
-                f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs",
-                key="jobs",
-                strict=True,
-            )
+            rows = await self._read_jobs(repo, run_id)
         except ForgeError:
             return (), _UNREADABLE_JOBS
-        rows = [j for j in data if isinstance(j, dict)]
         red_jobs = list(_red_jobs(rows, url="html_url"))
-        failed_jobs = list(red_jobs)
-        failed_jobs += [
-            FailedJob(
-                str(row.get("name", "")),
-                "cancelled",
-                "cancelled_no_steps",
-                str(row.get("html_url") or "") or None,
-            )
-            for row in rows
-            if str(row.get("conclusion") or "").upper() == "CANCELLED" and row.get("steps") == []
-        ]
+        failed_jobs = [*red_jobs, *_cancelled_no_step_jobs(rows)]
         red = [j for j in rows if str(j.get("conclusion") or "").upper() in _GH_RED]
         detail: tuple[str, ...] = ()
         # ponytail: first two failed jobs, last 15 log lines each, as `glab`.
@@ -1161,6 +1157,16 @@ class GhCli(mr_ops.CliWaits):
             log = gq.failed_step_log(row, whole.text)
             detail += tuple(f"  {line}" for line in render.terminal_lines(log.strip())[-15:])
         return detail, tuple(failed_jobs)
+
+    async def _read_jobs(self, repo: Path, run_id: str) -> list[dict]:
+        """Read every job for an Actions run without fetching job logs."""
+        data = await self._paged(
+            repo,
+            f"repos/{{owner}}/{{repo}}/actions/runs/{run_id}/jobs",
+            key="jobs",
+            strict=True,
+        )
+        return [j for j in data if isinstance(j, dict)]
 
     async def find_mr(self, *, repo: Path, branch: str) -> MRRef | None:
         data = await self._gql(repo, gq.FIND_QUERY, gq.owner_vars(b=branch))
@@ -1252,7 +1258,11 @@ class GhCli(mr_ops.CliWaits):
                 status=str(
                     j.get("conclusion") if j.get("status") == "completed" else j.get("status")
                 ),
-                failure_reason=_GH_FAILURE_REASON.get(str(j.get("conclusion") or "").upper()),
+                failure_reason=(
+                    str(j["conclusion"])
+                    if str(j.get("conclusion") or "").upper() in _GH_RED
+                    else None
+                ),
                 url=str(j.get("html_url") or ""),
             )
             for j in rows
